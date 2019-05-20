@@ -1,4 +1,6 @@
 #include <cmath>
+#include <chrono>
+#include <ctime>
 #include <iostream>
 #include <fstream>
 #include <math.h>
@@ -33,11 +35,22 @@
 #include <pcl/registration/default_convergence_criteria.h>
 #include <pcl/registration/icp.h>
 #include <pcl/registration/transformation_estimation_point_to_plane_lls.h>
-#include <boost/log/core.hpp>
 
+// Logging
+#include <boost/log/trivial.hpp>
+#include <boost/log/expressions.hpp>
+#include <boost/log/sources/severity_logger.hpp>
+#include <boost/log/sources/record_ostream.hpp>
+#include <boost/log/utility/setup/file.hpp>
+#include <boost/log/utility/setup/common_attributes.hpp>
+#include <boost/log/support/date_time.hpp>
+
+namespace logging = boost::log;
+namespace src = boost::log::sources;
+namespace expr = boost::log::expressions;
+namespace keywords = boost::log::keywords;
 using namespace std;
 using namespace pcl;
-using namespace io;
 using namespace boost;
 
 property_tree::ptree CONFIG;
@@ -74,14 +87,15 @@ void FeatureAlign(PointCloud<PointXYZRGBI>::Ptr &dataCloud, float inlier, float 
 void IterativeAlign(PointCloud<PointXYZRGBI>::Ptr &dataCloud,
 	PointCloud<PointXYZ>::Ptr filteredReference, PointCloud<PointXYZ>::Ptr filteredCloud,
 	PointCloud<Normal>::Ptr normalReference, PointCloud<Normal>::Ptr normalCloud);
-PointCloud<PointXYZ>::Ptr LoadAsciiCloud(string filepath);
 PointCloud<PointXYZ>::Ptr VoxelFilter(const PointCloud<PointXYZ>::Ptr cloud, PointCloud<PointXYZ>::Ptr &filtered, float lx, float ly, float lz);
 
 bool
 loadCloud (const string &filename, PointCloud<PointXYZRGBI> &cloud, PointCloud<PointXYZ> &simpleCloud)
 {
   ifstream fs;
+  cout << filename << endl;
   fs.open (filename.c_str (), ios::binary);
+  cout << filename << " open" << endl;
   if (!fs.is_open () || fs.fail ())
   {
     cout << "Could not open file." << endl; 
@@ -167,23 +181,108 @@ property_tree::ptree LoadConfig(string configFile){
 }
 
 void Log(string message){
-
+	bool log = CONFIG.get("logging.log", false);
+	string fname = CONFIG.get("logging.log_file", "");
+	bool print = CONFIG.get("logging.print_log", false);
+	time_t rawtime;
+	struct tm * timeinfo;
+	char start[80];
+	time(&rawtime);
+	timeinfo = localtime(&rawtime);
+	strftime(start, 80, "%Y_%m_%d %H:%M:%S", timeinfo);
+	string output = *start + ": " + message  + "\n";
+	if (log) {
+		ofstream file(fname);
+		if (!file || print)
+		{
+			cout << output << endl;
+			return;
+		}
+		file << output;
+		file.close();
+	}
 	return;
 }
 
 void SetupLogger(){
-	//log::add_file_log("sample.log");
+	bool log = CONFIG.get("logging.log", false);
+	bool autoGenerate = CONFIG.get("logging.autogenerate_log_file", false);
+	cout << autoGenerate << endl;
+	string logFile = CONFIG.get("logging.log_file", "");
+	string fname = logFile;
+	if (log) {
+		time_t rawtime;
+		struct tm * timeinfo;
+		char start[80];
+
+		time(&rawtime);
+		timeinfo = localtime(&rawtime);
+
+		strftime(start, 80, "_%Y%m%d", timeinfo);
+		if (autoGenerate) {
+			string alignFilePrefix = CONFIG.get("align_file_prefix", "");
+			fname = alignFilePrefix + start + ".txt";
+		}
+		CONFIG.put("logging.log_file", fname);
+		if (ifstream(fname))
+		{
+			cout << "Logfile already exists logs will be appended." << endl;
+		}
+		ofstream file(fname);
+		if (!file)
+		{
+			cout << "File could not be created. Logging to console." << endl;
+			return;
+		}
+		file << "Logging start: " << start;
+		file.close();
+	}
 	return;
 }
 
+string ValidateConfig() {
+	string isValidMessage = "";
+	// Check for input files
+	string baseFile = CONFIG.get("base_file", "");
+	if (baseFile == "") {
+		isValidMessage += "\tbase_file: A base file for alignment is required.\n";
+	}
+	string snipFile = CONFIG.get("snip_file", "");
+	string alignFilePrefix = CONFIG.get("align_file_prefix", "");
+	if (alignFilePrefix == "") {
+		isValidMessage += "\talign_file_prefix: The prefix for the files to align is required.\n";
+	}
+	int numFiles = CONFIG.get("number_files", 0);
+	if (numFiles <= 0) {
+		isValidMessage += "\tnumber_files: Number of files must be greater than zero.\n";
+	}
+	string fileExtension = CONFIG.get("file_extension", "");
+	if (fileExtension == "") {
+		isValidMessage += "\tfile_extension: A file extension for the alignment files is required.\n";
+	}
 
-
+	// Check for logging
+	bool log = CONFIG.get("logging.log", false);
+	if (log) {
+		bool autoGenerate = CONFIG.get("logging.autogenerate_log_file", false);
+		string logFile = CONFIG.get("logging.log_file", "");
+		if (!autoGenerate && logFile == "") {
+			isValidMessage += "\tlogging.log_file: Without specifying autogeneration of log files, a file name is required.\n";
+		}
+	}
+	return isValidMessage;
+}
 
 
 int main (int argc, char** argv){
-
 	string configFile = argv[1];
 	CONFIG = LoadConfig(configFile);
+	string isValidMessage = ValidateConfig();
+	
+	if (isValidMessage != "") {
+		cout << "Invalid config parameters: " + isValidMessage << endl;
+		return (-1);
+	}
 	SetupLogger();
 	
 
@@ -191,23 +290,27 @@ int main (int argc, char** argv){
 	// Load reference cloud
 	PointCloud<PointXYZRGBI>::Ptr cloud1 (new PointCloud<PointXYZRGBI>);
 	PointCloud<PointXYZ>::Ptr simpleCloud1 (new PointCloud<PointXYZ>);
+	string baselineFile = CONFIG.get("base_file", "");
+	string alignFilePrefix = CONFIG.get("align_file_prefix", "");
+	string fileExtension = CONFIG.get("file_extension", "");
+	if (fileExtension.at(0) != '.') {
+		fileExtension = "." + fileExtension;
+	}
 	cout << "Loading reference cloud" << endl;
 	if (!loadCloud (baselineFile, *cloud1, *simpleCloud1)){
 		cout << "Unable to load file: " << baselineFile << endl;
 		return (-1);
 	}
 
-	// Load reference cloud
 	PointCloud<PointXYZRGBI>::Ptr mergedCloud (new PointCloud<PointXYZRGBI>);
-	   
-
+	int numFiles = CONFIG.get("number_files", 0);
+	cout <<" numfiles " <<  numFiles << endl;
 	for (int i=1; i <= numFiles; i++){
-		long long ii = i;
-		string suffix = to_string(ii);
 
 	   // Loading cloud to align
 	   PointCloud<PointXYZ>::Ptr simpleCloud2 (new PointCloud<PointXYZ>);
 	   PointCloud<PointXYZRGBI>::Ptr cloud2 (new PointCloud<PointXYZRGBI>);
+	   string cloudFile = alignFilePrefix + to_string((long long)i) + fileExtension;
 	   cout << "Loading cloud to align" << endl;
 	   if (!loadCloud (cloudFile, *cloud2, *simpleCloud2)){
 		   cout << "Unable to load file: " << cloudFile << endl;
@@ -216,54 +319,54 @@ int main (int argc, char** argv){
 	   cout << "Clouds successfully loaded." << endl;
 	   string ftext = cloudFile + "_" + to_string((long long)i) + "_aligned.pcd";
 
-	   double resolution = CalculateResolution(simpleCloud2);
-   
-	   float lx = 8 * resolution;
-	   float radius = 5 * lx;
-	   float inlier = .25;
-	   float feature = radius * 2;
-	   cout << "multiplier " << resolution/lx << endl;
+	//   double resolution = CalculateResolution(simpleCloud2);
+ //  
+	//   float lx = 8 * resolution;
+	//   float radius = 5 * lx;
+	//   float inlier = .25;
+	//   float feature = radius * 2;
+	//   cout << "multiplier " << resolution/lx << endl;
 
-		PointCloud<PointXYZ>::Ptr filteredCloud (new PointCloud<PointXYZ>);
-		PointCloud<PointXYZ>::Ptr filteredReference (new PointCloud<PointXYZ>);
-	
-		*filteredReference = *simpleCloud1;
-		*filteredCloud = *simpleCloud2;
+	//	PointCloud<PointXYZ>::Ptr filteredCloud (new PointCloud<PointXYZ>);
+	//	PointCloud<PointXYZ>::Ptr filteredReference (new PointCloud<PointXYZ>);
+	//
+	//	*filteredReference = *simpleCloud1;
+	//	*filteredCloud = *simpleCloud2;
 
-		// Perform the voxel filtering
-		filteredReference = VoxelFilter(simpleCloud1, filteredReference, lx, lx, lx);
-		filteredCloud = VoxelFilter(simpleCloud2, filteredCloud, lx, lx, lx);
+	//	// Perform the voxel filtering
+	//	filteredReference = VoxelFilter(simpleCloud1, filteredReference, lx, lx, lx);
+	//	filteredCloud = VoxelFilter(simpleCloud2, filteredCloud, lx, lx, lx);
 
-		// Calculate normals
-		cout << "Calculate Normals" << endl;
-		PointCloud<Normal>::Ptr normalReference = CalculateNormals(filteredReference, radius);
-		PointCloud<Normal>::Ptr normalCloud = CalculateNormals(filteredCloud, radius);
+	//	// Calculate normals
+	//	cout << "Calculate Normals" << endl;
+	//	PointCloud<Normal>::Ptr normalReference = CalculateNormals(filteredReference, radius);
+	//	PointCloud<Normal>::Ptr normalCloud = CalculateNormals(filteredCloud, radius);
 
-	   cout << "Starting feature-based alignment." << endl;
-	   FeatureAlign(cloud2, inlier, feature, filteredReference, filteredCloud, normalReference, normalCloud);
-	   int start = 10;
-	   for (int sc=3; sc>0; sc--){
-		 int scale = start*sc;
-	   // Perform the voxel filtering
-		filteredReference = VoxelFilter(simpleCloud1, filteredReference, scale * resolution, scale * resolution, scale * resolution);
-		filteredCloud = VoxelFilter(simpleCloud2, filteredCloud, scale * resolution, scale * resolution, scale * resolution);
+	//   cout << "Starting feature-based alignment." << endl;
+	//   FeatureAlign(cloud2, inlier, feature, filteredReference, filteredCloud, normalReference, normalCloud);
+	//   int start = 10;
+	//   for (int sc=3; sc>0; sc--){
+	//	 int scale = start*sc;
+	//   // Perform the voxel filtering
+	//	filteredReference = VoxelFilter(simpleCloud1, filteredReference, scale * resolution, scale * resolution, scale * resolution);
+	//	filteredCloud = VoxelFilter(simpleCloud2, filteredCloud, scale * resolution, scale * resolution, scale * resolution);
 
-		// Calculate normals
-		cout << "Calculate Normals" << endl;
-		normalReference = CalculateNormals(filteredReference, 6*scale*resolution);
-		normalCloud = CalculateNormals(filteredCloud, 6*scale* resolution);
+	//	// Calculate normals
+	//	cout << "Calculate Normals" << endl;
+	//	normalReference = CalculateNormals(filteredReference, 6*scale*resolution);
+	//	normalCloud = CalculateNormals(filteredCloud, 6*scale* resolution);
 
-		cout << "Starting iterative alignment." << endl;
-		IterativeAlign(cloud2, filteredReference, filteredCloud, normalReference, normalCloud);
-	   }
-		w.writeBinaryCompressed (ftext, *cloud2);
-		if (i==1){
-			mergedCloud->points = cloud2->points;
-		}else{
-			mergedCloud->points.insert(mergedCloud->points.end(), cloud2->points.begin(), cloud2->points.end());
-		}
+	//	cout << "Starting iterative alignment." << endl;
+	//	IterativeAlign(cloud2, filteredReference, filteredCloud, normalReference, normalCloud);
+	//   }
+	//	w.writeBinaryCompressed (ftext, *cloud2);
+	//	if (i==1){
+	//		mergedCloud->points = cloud2->points;
+	//	}else{
+	//		mergedCloud->points.insert(mergedCloud->points.end(), cloud2->points.begin(), cloud2->points.end());
+	//	}
 	}
-    w.writeBinaryCompressed (cloudFile + "_merged.pcd", *mergedCloud);
+ //   w.writeBinaryCompressed (alignFilePrefix + "_merged.pcd", *mergedCloud);
 	
    return (0);
 }
@@ -436,10 +539,10 @@ void FeatureAlign(PointCloud<PointXYZRGBI>::Ptr &dataCloud, float inlier, float 
 
 	cout << "Rejecting outliers" << endl;
 	registration::CorrespondenceRejectorSampleConsensus<PointXYZ> rejector;
-	rejector.setInputCloud (keypointsCloud);
+	rejector.setInputSource (keypointsCloud);
 	rejector.setInputTarget (keypointsReference);
 	rejector.setInputCorrespondences (correspondences);
-	rejector.setMaxIterations (400000);
+	rejector.setMaximumIterations (400000);
 	rejector.setInlierThreshold (inlier);
 	rejector.setRefineModel(true);
 	rejector.setRefineModel(true);
